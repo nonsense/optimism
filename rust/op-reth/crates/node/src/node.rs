@@ -49,7 +49,7 @@ use reth_optimism_rpc::{
     eth::{OpEthApiBuilder, ext::OpEthExtApi},
     historical::{HistoricalRpc, HistoricalRpcClient},
     miner::{MinerApiExtServer, OpMinerExtApi},
-    witness::{DebugExecutionWitnessApiServer, OpDebugWitnessApi},
+    witness::{DebugExecutionWitnessApiServer, OpDebugSdmApiServer, OpDebugWitnessApi},
 };
 use reth_optimism_storage::OpStorage;
 use reth_optimism_txpool::{
@@ -503,7 +503,7 @@ where
     N: FullNodeComponents<
             Types: NodeTypes<
                 ChainSpec: OpHardforks,
-                Primitives: OpPayloadPrimitives,
+                Primitives = OpPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
             Evm: ConfigureSdmEvm<
@@ -571,6 +571,7 @@ where
             ctx.node.provider().clone(),
             Box::new(ctx.node.task_executor().clone()),
             builder,
+            ctx.node.evm_config().clone(),
         );
         let miner_ext = OpMinerExtApi::new(da_config, gas_limit_config);
 
@@ -592,7 +593,14 @@ where
                     container;
 
                 debug!(target: "reth::cli", "Installing debug payload witness rpc endpoint");
-                modules.merge_if_module_configured(RethRpcModule::Debug, debug_ext.into_rpc())?;
+                modules.merge_if_module_configured(
+                    RethRpcModule::Debug,
+                    DebugExecutionWitnessApiServer::into_rpc(debug_ext.clone()),
+                )?;
+                modules.merge_if_module_configured(
+                    RethRpcModule::Debug,
+                    OpDebugSdmApiServer::into_rpc(debug_ext),
+                )?;
 
                 // extend the miner namespace if configured in the regular http server
                 modules.add_or_replace_if_module_configured(
@@ -632,7 +640,7 @@ where
     N: FullNodeComponents<
             Types: NodeTypes<
                 ChainSpec: OpHardforks,
-                Primitives: OpPayloadPrimitives,
+                Primitives = OpPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
             Evm: ConfigureSdmEvm<
@@ -978,8 +986,8 @@ where
         let Self { pool_config_overrides, .. } = self;
 
         // supervisor used for interop
-        if ctx.chain_spec().is_interop_active_at_timestamp(ctx.head().timestamp) &&
-            self.supervisor_http == DEFAULT_SUPERVISOR_URL
+        if ctx.chain_spec().is_interop_active_at_timestamp(ctx.head().timestamp)
+            && self.supervisor_http == DEFAULT_SUPERVISOR_URL
         {
             info!(target: "reth::cli",
                 url=%DEFAULT_SUPERVISOR_URL,
