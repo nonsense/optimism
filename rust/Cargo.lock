@@ -268,8 +268,6 @@ dependencies = [
 [[package]]
 name = "alloy-evm"
 version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2ccfe6d724ceabd5518350cfb34f17dd3a6c3cc33579eee94d98101d3a511ff"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9505,7 +9503,6 @@ dependencies = [
 [[package]]
 name = "reth-codecs"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11695,7 +11692,6 @@ dependencies = [
 [[package]]
 name = "reth-primitives-traits"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -12606,8 +12602,6 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "13.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "892ff3e6a566cf8d72ffb627fdced3becebbd9ba64089c25975b9b028af326a5"
 dependencies = [
  "bitvec",
  "cfg-if",
@@ -12623,8 +12617,6 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "14.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57f61cc6d23678c4840af895b19f8acfbbd546142ec8028b6526c53cc1c16c98"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
