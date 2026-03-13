@@ -394,6 +394,7 @@ dependencies = [
  "op-alloy",
  "op-revm",
  "revm",
+ "revm-context",
  "thiserror 2.0.18",
 ]
 
