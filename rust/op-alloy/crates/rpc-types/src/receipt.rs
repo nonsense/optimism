@@ -19,6 +19,15 @@ pub struct OpTransactionReceipt {
     /// L1 block info of the transaction.
     #[serde(flatten)]
     pub l1_block_info: L1BlockInfo,
+    /// Per-transaction gas refund from SDM block-level warming.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    pub op_gas_refund: Option<u64>,
+    /// Deposit nonce for deposit transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    pub deposit_nonce: Option<u64>,
+    /// Deposit receipt version for deposit transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    pub deposit_receipt_version: Option<u64>,
 }
 
 impl alloy_network_primitives::ReceiptResponse for OpTransactionReceipt {
@@ -87,6 +96,9 @@ pub struct OpTransactionReceiptFields {
     /// L1 block info.
     #[serde(flatten)]
     pub l1_block_info: L1BlockInfo,
+    /// Per-transaction gas refund from SDM block-level warming.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    pub op_gas_refund: Option<u64>,
     /* --------------------------------------- Regolith --------------------------------------- */
     /// Deposit nonce for deposit transactions.
     ///
@@ -229,6 +241,7 @@ impl From<OpTransactionReceipt> for OpReceiptEnvelope<alloy_primitives::Log> {
             OpReceiptEnvelope::Eip2930(receipt) => Self::Eip2930(convert_standard_receipt(receipt)),
             OpReceiptEnvelope::Eip1559(receipt) => Self::Eip1559(convert_standard_receipt(receipt)),
             OpReceiptEnvelope::Eip7702(receipt) => Self::Eip7702(convert_standard_receipt(receipt)),
+            OpReceiptEnvelope::Sdm(receipt) => Self::Sdm(convert_standard_receipt(receipt)),
             OpReceiptEnvelope::Deposit(OpDepositReceiptWithBloom { logs_bloom, receipt }) => {
                 let consensus_logs = receipt.inner.logs.into_iter().map(|log| log.inner).collect();
                 let consensus_receipt = OpDepositReceiptWithBloom {
@@ -331,5 +344,14 @@ mod tests {
 
         let op_fields: OpTransactionReceiptFields = serde_json::from_value(json).unwrap();
         assert_eq!(op_fields.l1_block_info.l1_fee_scalar, None);
+    }
+
+    #[test]
+    fn serialize_op_gas_refund() {
+        let op_fields =
+            OpTransactionReceiptFields { op_gas_refund: Some(0x1234), ..Default::default() };
+
+        let json = serde_json::to_value(op_fields).unwrap();
+        assert_eq!(json["opGasRefund"], serde_json::Value::String("0x1234".to_string()));
     }
 }
