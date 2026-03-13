@@ -261,6 +261,7 @@ impl OpReceiptFieldsBuilder {
                 operator_fee_constant,
                 da_footprint_gas_scalar,
             },
+            op_gas_refund: None,
             deposit_nonce,
             deposit_receipt_version,
         }
@@ -300,6 +301,7 @@ impl OpReceiptBuilder {
                 OpReceipt::Eip2930(receipt) => OpReceipt::Eip2930(map_logs(receipt)),
                 OpReceipt::Eip1559(receipt) => OpReceipt::Eip1559(map_logs(receipt)),
                 OpReceipt::Eip7702(receipt) => OpReceipt::Eip7702(map_logs(receipt)),
+                OpReceipt::Sdm(receipt) => OpReceipt::Sdm(map_logs(receipt)),
                 OpReceipt::Deposit(receipt) => OpReceipt::Deposit(receipt.map_inner(map_logs)),
             };
             mapped_receipt.into_with_bloom()
@@ -332,9 +334,20 @@ impl OpReceiptBuilder {
     pub fn build(self) -> OpTransactionReceipt {
         let Self { core_receipt: inner, op_receipt_fields } = self;
 
-        let OpTransactionReceiptFields { l1_block_info, .. } = op_receipt_fields;
+        let OpTransactionReceiptFields {
+            l1_block_info,
+            op_gas_refund,
+            deposit_nonce,
+            deposit_receipt_version,
+        } = op_receipt_fields;
 
-        OpTransactionReceipt { inner, l1_block_info }
+        OpTransactionReceipt {
+            inner,
+            l1_block_info,
+            op_gas_refund,
+            deposit_nonce,
+            deposit_receipt_version,
+        }
     }
 }
 

@@ -154,7 +154,8 @@ mod op {
                 Self::Legacy(receipt) |
                 Self::Eip2930(receipt) |
                 Self::Eip1559(receipt) |
-                Self::Eip7702(receipt) => receipt.size(),
+                Self::Eip7702(receipt) |
+                Self::Sdm(receipt) => receipt.size(),
                 Self::Deposit(receipt) => receipt.size(),
             }
         }
@@ -167,6 +168,7 @@ mod op {
                 Self::Eip2930(tx) => tx.size(),
                 Self::Eip1559(tx) => tx.size(),
                 Self::Eip7702(tx) => tx.size(),
+                Self::Sdm(tx) => tx.size(),
                 Self::Deposit(tx) => tx.size(),
             }
         }
@@ -190,6 +192,7 @@ mod op {
                 Self::Eip2930(tx) => tx.size(),
                 Self::Eip1559(tx) => tx.size(),
                 Self::Eip7702(tx) => tx.size(),
+                Self::Sdm(tx) => tx.size(),
                 Self::Deposit(tx) => tx.size(),
             }
         }

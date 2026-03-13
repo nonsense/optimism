@@ -14,7 +14,10 @@ use alloy_consensus::{
 };
 use alloy_primitives::{Address, Bytes, Sealed, Signature, TxKind, B256, U256};
 use bytes::BufMut;
-use op_alloy_consensus::{OpTxEnvelope, OpTxType, OpTypedTransaction, TxDeposit as AlloyTxDeposit};
+use op_alloy_consensus::{
+    OpTxEnvelope, OpTxType, OpTypedTransaction, SDMPayload, SDM_TX_TYPE_ID,
+    TxDeposit as AlloyTxDeposit, TxSdm as AlloyTxSdm,
+};
 use reth_codecs_derive::add_arbitrary_tests;
 
 /// Deposit transactions, also known as deposits are initiated on L1, and executed on L2.
@@ -82,6 +85,22 @@ impl Compact for AlloyTxDeposit {
     }
 }
 
+impl Compact for AlloyTxSdm {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.payload.to_rlp_bytes().to_compact(buf)
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (payload_rlp, remaining) = Bytes::from_compact(buf, len);
+        let payload = SDMPayload::from_rlp_bytes(&payload_rlp)
+            .expect("invalid compact SDM payload encoding");
+        (Self::new(payload), remaining)
+    }
+}
+
 impl crate::Compact for OpTxType {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
@@ -95,6 +114,10 @@ impl crate::Compact for OpTxType {
             Self::Eip1559 => COMPACT_IDENTIFIER_EIP1559,
             Self::Eip7702 => {
                 buf.put_u8(EIP7702_TX_TYPE_ID);
+                COMPACT_EXTENDED_IDENTIFIER_FLAG
+            }
+            Self::Sdm => {
+                buf.put_u8(SDM_TX_TYPE_ID);
                 COMPACT_EXTENDED_IDENTIFIER_FLAG
             }
             Self::Deposit => {
@@ -118,6 +141,7 @@ impl crate::Compact for OpTxType {
                     let extended_identifier = buf.get_u8();
                     match extended_identifier {
                         EIP7702_TX_TYPE_ID => Self::Eip7702,
+                        SDM_TX_TYPE_ID => Self::Sdm,
                         op_alloy_consensus::DEPOSIT_TX_TYPE_ID => Self::Deposit,
                         _ => panic!("Unsupported OpTxType identifier: {extended_identifier}"),
                     }
@@ -140,6 +164,7 @@ impl Compact for OpTypedTransaction {
             Self::Eip2930(tx) => tx.to_compact(out),
             Self::Eip1559(tx) => tx.to_compact(out),
             Self::Eip7702(tx) => tx.to_compact(out),
+            Self::Sdm(tx) => tx.to_compact(out),
             Self::Deposit(tx) => tx.to_compact(out),
         };
         identifier
@@ -164,6 +189,10 @@ impl Compact for OpTypedTransaction {
                 let (tx, buf) = Compact::from_compact(buf, buf.len());
                 (Self::Eip7702(tx), buf)
             }
+            OpTxType::Sdm => {
+                let (tx, buf) = Compact::from_compact(buf, buf.len());
+                (Self::Sdm(tx), buf)
+            }
             OpTxType::Deposit => {
                 let (tx, buf) = Compact::from_compact(buf, buf.len());
                 (Self::Deposit(tx), buf)
@@ -179,6 +208,7 @@ impl ToTxCompact for OpTxEnvelope {
             Self::Eip2930(tx) => tx.tx().to_compact(buf),
             Self::Eip1559(tx) => tx.tx().to_compact(buf),
             Self::Eip7702(tx) => tx.tx().to_compact(buf),
+            Self::Sdm(tx) => tx.to_compact(buf),
             Self::Deposit(tx) => tx.to_compact(buf),
         };
     }
@@ -209,6 +239,11 @@ impl FromTxCompact for OpTxEnvelope {
                 let tx = Signed::new_unhashed(tx, signature);
                 (Self::Eip7702(tx), buf)
             }
+            OpTxType::Sdm => {
+                let (tx, buf) = op_alloy_consensus::TxSdm::from_compact(buf, buf.len());
+                let tx = Sealed::new(tx);
+                (Self::Sdm(tx), buf)
+            }
             OpTxType::Deposit => {
                 let (tx, buf) = op_alloy_consensus::TxDeposit::from_compact(buf, buf.len());
                 let tx = Sealed::new(tx);
@@ -227,6 +262,7 @@ impl Envelope for OpTxEnvelope {
             Self::Eip2930(tx) => tx.signature(),
             Self::Eip1559(tx) => tx.signature(),
             Self::Eip7702(tx) => tx.signature(),
+            Self::Sdm(_) => &DEPOSIT_SIGNATURE,
             Self::Deposit(_) => &DEPOSIT_SIGNATURE,
         }
     }
