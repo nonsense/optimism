@@ -24,6 +24,7 @@ alloy-op-hardforks.workspace = true
 op-alloy = { workspace = true, features = ["consensus"] }
 
 revm = { workspace = true }
+revm-context = { workspace = true }
 op-revm = { workspace = true }
 
 thiserror = { workspace = true }
@@ -38,6 +39,7 @@ default = ["std"]
 std = [
 	"alloy-primitives/std",
 	"revm/std",
+	"revm-context/std",
 	"alloy-evm/std",
 	"op-revm/std",
 	"alloy-consensus/std",

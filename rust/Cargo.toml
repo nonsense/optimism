@@ -374,6 +374,7 @@ reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth", tag = "v1
 
 # ==================== REVM (latest: op-reth versions) ====================
 revm = { version = "34.0.0", default-features = false }
+revm-context = { version = "13.0.0", default-features = false }
 revm-bytecode = { version = "8.0.0", default-features = false }
 revm-database = { version = "10.0.0", default-features = false }
 revm-state = { version = "9.0.0", default-features = false }

@@ -12,14 +12,14 @@ use bytecode::Bytecode;
 use context_interface::{
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{
-        account::JournaledAccount, AccountInfoLoad, AccountLoad, JournalCheckpoint,
-        JournalLoadError, JournalTr, TransferError,
+        AccountInfoLoad, AccountLoad, JournalCheckpoint, JournalLoadError, JournalTr,
+        TransferError, account::JournaledAccount,
     },
 };
 use core::ops::{Deref, DerefMut};
 use database_interface::Database;
 use primitives::{
-    hardfork::SpecId, Address, HashMap, HashSet, Log, StorageKey, StorageValue, B256, U256,
+    Address, B256, HashMap, HashSet, Log, StorageKey, StorageValue, U256, hardfork::SpecId,
 };
 use state::{Account, EvmState};
 use std::vec::Vec;
@@ -99,10 +99,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         DB: 'a;
 
     fn new(database: DB) -> Journal<DB, ENTRY> {
-        Self {
-            inner: JournalInner::new(),
-            database,
-        }
+        Self { inner: JournalInner::new(), database }
     }
 
     fn db(&self) -> &Self::Database {
@@ -163,8 +160,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         skip_cold_load: bool,
     ) -> Result<StateLoad<SelfDestructResult>, JournalLoadError<<Self::Database as Database>::Error>>
     {
-        self.inner
-            .selfdestruct(&mut self.database, address, target, skip_cold_load)
+        self.inner.selfdestruct(&mut self.database, address, target, skip_cold_load)
     }
 
     #[inline]
@@ -177,9 +173,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     }
 
     fn warm_precompiles(&mut self, precompiles: HashSet<Address>) {
-        self.inner
-            .warm_addresses
-            .set_precompile_addresses(precompiles);
+        self.inner.warm_addresses.set_precompile_addresses(precompiles);
     }
 
     #[inline]
@@ -230,8 +224,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         old_balance: U256,
         bump_nonce: bool,
     ) {
-        self.inner
-            .caller_accounting_journal_entry(address, old_balance, bump_nonce);
+        self.inner.caller_accounting_journal_entry(address, old_balance, bump_nonce);
     }
 
     /// Increments the balance of the account.
@@ -241,8 +234,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         address: Address,
         balance: U256,
     ) -> Result<(), <Self::Database as Database>::Error> {
-        self.inner
-            .balance_incr(&mut self.database, address, balance)
+        self.inner.balance_incr(&mut self.database, address, balance)
     }
 
     /// Increments the nonce of the account.
@@ -291,8 +283,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         &mut self,
         address: Address,
     ) -> Result<StateLoad<AccountLoad>, DB::Error> {
-        self.inner
-            .load_account_delegated(&mut self.database, address)
+        self.inner.load_account_delegated(&mut self.database, address)
     }
 
     #[inline]
@@ -324,8 +315,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         spec_id: SpecId,
     ) -> Result<JournalCheckpoint, TransferError> {
         // Ignore error.
-        self.inner
-            .create_account_checkpoint(caller, address, balance, spec_id)
+        self.inner.create_account_checkpoint(caller, address, balance, spec_id)
     }
 
     #[inline]
@@ -345,6 +335,31 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     }
 
     #[inline]
+    fn enable_persistent_warming(&mut self) {
+        self.inner.enable_persistent_warming();
+    }
+
+    #[inline]
+    fn disable_persistent_warming(&mut self) {
+        self.inner.disable_persistent_warming();
+    }
+
+    #[inline]
+    fn is_persistent_warming_enabled(&self) -> bool {
+        self.inner.is_persistent_warming_enabled()
+    }
+
+    #[inline]
+    fn current_tx_warming_savings(&self) -> u64 {
+        self.inner.current_tx_warming_savings()
+    }
+
+    #[inline]
+    fn take_last_tx_warming_savings(&mut self) -> u64 {
+        self.inner.take_last_tx_warming_savings()
+    }
+
+    #[inline]
     fn sload_skip_cold_load(
         &mut self,
         address: Address,
@@ -352,8 +367,7 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
         skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, JournalLoadError<<Self::Database as Database>::Error>>
     {
-        self.inner
-            .sload_assume_account_present(&mut self.database, address, key, skip_cold_load)
+        self.inner.sload_assume_account_present(&mut self.database, address, key, skip_cold_load)
     }
 
     #[inline]

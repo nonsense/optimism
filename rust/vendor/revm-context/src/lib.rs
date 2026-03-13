@@ -8,6 +8,7 @@ extern crate alloc as std;
 pub use context_interface::*;
 
 pub mod block;
+pub mod block_warming;
 pub mod cfg;
 pub mod context;
 pub mod evm;

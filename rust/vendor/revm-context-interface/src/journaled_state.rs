@@ -2,17 +2,19 @@
 
 pub mod account;
 pub mod entry;
+/// Persistent cross-transaction warming cache types.
+pub mod persistent_warm_cache;
 
 use crate::{
+    ErasedError,
     context::{SStoreResult, SelfDestructResult},
     host::LoadError,
     journaled_state::account::JournaledAccountTr,
-    ErasedError,
 };
 use core::ops::{Deref, DerefMut};
 use database_interface::Database;
 use primitives::{
-    hardfork::SpecId, Address, Bytes, HashMap, HashSet, Log, StorageKey, StorageValue, B256, U256,
+    Address, B256, Bytes, HashMap, HashSet, Log, StorageKey, StorageValue, U256, hardfork::SpecId,
 };
 use state::{Account, AccountInfo, Bytecode};
 use std::{borrow::Cow, vec::Vec};
@@ -47,8 +49,7 @@ pub trait JournalTr {
         key: StorageKey,
     ) -> Result<StateLoad<StorageValue>, <Self::Database as Database>::Error> {
         // unwrapping is safe as we only can get DBError
-        self.sload_skip_cold_load(address, key, false)
-            .map_err(JournalLoadError::unwrap_db_error)
+        self.sload_skip_cold_load(address, key, false).map_err(JournalLoadError::unwrap_db_error)
     }
 
     /// Loads the storage value from Journal state.
@@ -292,6 +293,27 @@ pub trait JournalTr {
     /// Clear current journal resetting it to initial state and return changes state.
     fn finalize(&mut self) -> Self::State;
 
+    /// Enable persistent warming. Warming persists for the EVM instance lifetime.
+    fn enable_persistent_warming(&mut self) {}
+
+    /// Disable persistent warming.
+    fn disable_persistent_warming(&mut self) {}
+
+    /// Returns true if persistent warming is enabled.
+    fn is_persistent_warming_enabled(&self) -> bool {
+        false
+    }
+
+    /// Returns the current transaction's warming savings without resetting them.
+    fn current_tx_warming_savings(&self) -> u64 {
+        0
+    }
+
+    /// Take the savings recorded for the most recently committed transaction.
+    fn take_last_tx_warming_savings(&mut self) -> u64 {
+        0
+    }
+
     /// Loads the account info from Journal state.
     fn load_account_info_skip_cold_load(
         &mut self,
@@ -330,11 +352,7 @@ impl<E> JournalLoadError<E> {
     /// Takes the error if it is a database error.
     #[inline]
     pub fn take_db_error(self) -> Option<E> {
-        if let JournalLoadError::DBError(e) = self {
-            Some(e)
-        } else {
-            None
-        }
+        if let JournalLoadError::DBError(e) = self { Some(e) } else { None }
     }
 
     /// Unwraps the error if it is a database error.
@@ -474,11 +492,7 @@ impl<'a> AccountInfoLoad<'a> {
     /// Creates new [`AccountInfoLoad`] with the given account info, cold load status and empty status.
     #[inline]
     pub fn new(account: &'a AccountInfo, is_cold: bool, is_empty: bool) -> Self {
-        Self {
-            account: Cow::Borrowed(account),
-            is_cold,
-            is_empty,
-        }
+        Self { account: Cow::Borrowed(account), is_cold, is_empty }
     }
 
     /// Maps the account info of the [`AccountInfoLoad`] to a new [`StateLoad`].

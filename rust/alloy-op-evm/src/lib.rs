@@ -24,14 +24,20 @@ use op_revm::{
 use revm::{
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
     context::{BlockEnv, TxEnv},
-    context_interface::result::{EVMError, ResultAndState},
+    context_interface::{
+        JournalTr,
+        result::{EVMError, ResultAndState},
+    },
     handler::{PrecompileProvider, instructions::EthInstructions},
     inspector::NoOpInspector,
     interpreter::{InterpreterResult, interpreter::EthInterpreter},
 };
+use revm_context::block_warming;
 
 pub mod block;
 pub use block::{OpBlockExecutionCtx, OpBlockExecutor, OpBlockExecutorFactory};
+
+pub mod sdm;
 
 /// OP EVM implementation.
 ///
@@ -112,7 +118,22 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        if self.inspect { self.inner.inspect_tx(tx) } else { self.inner.transact(tx) }
+        #[cfg(feature = "std")]
+        block_warming::set_last_tx_warming_savings(0);
+
+        let result =
+            if self.inspect { self.inner.inspect_one_tx(tx) } else { self.inner.transact_one(tx) };
+
+        #[cfg(feature = "std")]
+        let warming_savings = self.inner.0.ctx.journaled_state.take_last_tx_warming_savings();
+
+        let state = self.inner.finalize();
+
+        #[cfg(feature = "std")]
+        block_warming::set_last_tx_warming_savings(warming_savings);
+
+        let result = result?;
+        Ok(ResultAndState::new(result, state))
     }
 
     fn transact_system_call(
@@ -173,17 +194,17 @@ impl EvmFactory for OpEvmFactory {
         input: EvmEnv<OpSpecId>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(NoOpInspector {})
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: false,
-        }
+        let mut inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(NoOpInspector {})
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+        inner.0.ctx.journaled_state.enable_persistent_warming();
+
+        OpEvm { inner, inspect: false }
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -193,17 +214,17 @@ impl EvmFactory for OpEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(inspector)
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: true,
-        }
+        let mut inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(inspector)
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+        inner.0.ctx.journaled_state.enable_persistent_warming();
+
+        OpEvm { inner, inspect: true }
     }
 }
 

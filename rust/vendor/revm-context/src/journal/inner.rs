@@ -4,18 +4,19 @@ use bytecode::Bytecode;
 use context_interface::{
     context::{SStoreResult, SelfDestructResult, StateLoad},
     journaled_state::{
+        AccountLoad, JournalCheckpoint, JournalLoadError, TransferError,
         account::{JournaledAccount, JournaledAccountTr},
         entry::{JournalEntryTr, SelfdestructionRevertStatus},
-        AccountLoad, JournalCheckpoint, JournalLoadError, TransferError,
+        persistent_warm_cache::PersistentWarmCache,
     },
 };
 use core::mem;
 use database_interface::Database;
 use primitives::{
+    Address, B256, HashMap, KECCAK_EMPTY, Log, StorageKey, StorageValue, U256,
     hardfork::SpecId::{self, *},
     hash_map::Entry,
     hints_util::unlikely,
-    Address, HashMap, Log, StorageKey, StorageValue, B256, KECCAK_EMPTY, U256,
 };
 use state::{Account, EvmState, TransientStorage};
 use std::vec::Vec;
@@ -58,6 +59,12 @@ pub struct JournalInner<ENTRY> {
     pub spec: SpecId,
     /// Warm addresses containing both coinbase and current precompiles.
     pub warm_addresses: WarmAddresses,
+    /// Cross-transaction warming cache that persists for the EVM instance lifetime.
+    pub persistent_warm_cache: Option<PersistentWarmCache>,
+    /// Savings accumulated during the current transaction.
+    pub tx_warming_savings: u64,
+    /// Savings accumulated during the most recently committed transaction.
+    pub last_tx_warming_savings: u64,
 }
 
 impl<ENTRY: JournalEntryTr> Default for JournalInner<ENTRY> {
@@ -81,7 +88,44 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             depth: 0,
             spec: SpecId::default(),
             warm_addresses: WarmAddresses::new(),
+            persistent_warm_cache: None,
+            tx_warming_savings: 0,
+            last_tx_warming_savings: 0,
         }
+    }
+
+    /// Enable persistent warming for the EVM instance lifetime.
+    #[inline]
+    pub fn enable_persistent_warming(&mut self) {
+        self.persistent_warm_cache = Some(PersistentWarmCache::new());
+        self.tx_warming_savings = 0;
+        self.last_tx_warming_savings = 0;
+    }
+
+    /// Disable persistent warming.
+    #[inline]
+    pub fn disable_persistent_warming(&mut self) {
+        self.persistent_warm_cache = None;
+        self.tx_warming_savings = 0;
+        self.last_tx_warming_savings = 0;
+    }
+
+    /// Returns true if persistent warming is enabled.
+    #[inline]
+    pub fn is_persistent_warming_enabled(&self) -> bool {
+        self.persistent_warm_cache.is_some()
+    }
+
+    /// Returns the current transaction's warming savings without resetting them.
+    #[inline]
+    pub const fn current_tx_warming_savings(&self) -> u64 {
+        self.tx_warming_savings
+    }
+
+    /// Take the savings recorded for the most recently committed transaction.
+    #[inline]
+    pub fn take_last_tx_warming_savings(&mut self) -> u64 {
+        mem::take(&mut self.last_tx_warming_savings)
     }
 
     /// Returns the logs
@@ -109,6 +153,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             transaction_id,
             spec,
             warm_addresses,
+            persistent_warm_cache: _,
+            tx_warming_savings,
+            last_tx_warming_savings,
         } = self;
         // Spec, precompiles, BAL and state are not changed. It is always set again execution.
         let _ = spec;
@@ -123,6 +170,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         warm_addresses.clear_coinbase_and_access_list();
         // increment transaction id.
         *transaction_id += 1;
+        *last_tx_warming_savings = mem::take(tx_warming_savings);
 
         logs.clear();
     }
@@ -139,6 +187,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             transaction_id,
             spec,
             warm_addresses,
+            persistent_warm_cache: _,
+            tx_warming_savings,
+            last_tx_warming_savings,
         } = self;
         let is_spurious_dragon_enabled = spec.is_enabled_in(SPURIOUS_DRAGON);
         // iterate over all journals entries and revert our global state
@@ -149,6 +200,8 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         *depth = 0;
         logs.clear();
         *transaction_id += 1;
+        *tx_warming_savings = 0;
+        *last_tx_warming_savings = 0;
 
         // Clear coinbase address warming for next tx
         warm_addresses.clear_coinbase_and_access_list();
@@ -171,11 +224,16 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             transaction_id,
             spec,
             warm_addresses,
+            persistent_warm_cache: _,
+            tx_warming_savings,
+            last_tx_warming_savings,
         } = self;
         // Spec is not changed. And it is always set again in execution.
         let _ = spec;
         // Clear coinbase address warming for next tx
         warm_addresses.clear_coinbase_and_access_list();
+        *tx_warming_savings = 0;
+        *last_tx_warming_savings = 0;
 
         let state = mem::take(state);
         logs.clear();
@@ -230,9 +288,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// Panics if the account has not been loaded and is missing from the state set.
     #[inline]
     pub fn account(&self, address: Address) -> &Account {
-        self.state
-            .get(&address)
-            .expect("Account expected to be loaded") // Always assume that acc is already loaded
+        self.state.get(&address).expect("Account expected to be loaded") // Always assume that acc is already loaded
     }
 
     /// Set code and its hash to the account.
@@ -276,8 +332,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         bump_nonce: bool,
     ) {
         // account balance changed.
-        self.journal
-            .push(ENTRY::balance_changed(address, old_balance));
+        self.journal.push(ENTRY::balance_changed(address, old_balance));
         // account is touched.
         self.journal.push(ENTRY::account_touched(address));
 
@@ -354,8 +409,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         *to_balance = to_balance_incr;
 
         // add journal entry
-        self.journal
-            .push(ENTRY::balance_transfer(from, to, balance));
+        self.journal.push(ENTRY::balance_transfer(from, to, balance));
 
         None
     }
@@ -449,10 +503,8 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// Makes a checkpoint that in case of Revert can bring back state to this point.
     #[inline]
     pub fn checkpoint(&mut self) -> JournalCheckpoint {
-        let checkpoint = JournalCheckpoint {
-            log_i: self.logs.len(),
-            journal_i: self.journal.len(),
-        };
+        let checkpoint =
+            JournalCheckpoint { log_i: self.logs.len(), journal_i: self.journal.len() };
         self.depth += 1;
         checkpoint
     }
@@ -474,12 +526,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
 
         // iterate over last N journals sets and revert our global state
         if checkpoint.journal_i < self.journal.len() {
-            self.journal
-                .drain(checkpoint.journal_i..)
-                .rev()
-                .for_each(|entry| {
-                    entry.revert(state, Some(transient_storage), is_spurious_dragon_enabled);
-                });
+            self.journal.drain(checkpoint.journal_i..).rev().for_each(|entry| {
+                entry.revert(state, Some(transient_storage), is_spurious_dragon_enabled);
+            });
         }
     }
 
@@ -534,12 +583,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         let journal_entry = if acc.is_created_locally() || !is_cancun_enabled {
             acc.mark_selfdestructed_locally();
             acc.info.balance = U256::ZERO;
-            Some(ENTRY::account_destroyed(
-                address,
-                target,
-                destroyed_status,
-                balance,
-            ))
+            Some(ENTRY::account_destroyed(address, target, destroyed_status, balance))
         } else if address != target {
             acc.info.balance = U256::ZERO;
             Some(ENTRY::balance_transfer(address, target, balance))
@@ -601,10 +645,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         let is_empty = account.state_clear_aware_is_empty(spec);
 
         let mut account_load = StateLoad::new(
-            AccountLoad {
-                is_delegate_account_cold: None,
-                is_empty,
-            },
+            AccountLoad { is_delegate_account_cold: None, is_empty },
             account.is_cold,
         );
 
@@ -716,7 +757,100 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             &mut self.journal,
             db,
             self.warm_addresses.access_list(),
+            self.persistent_warm_cache.as_mut(),
+            &mut self.tx_warming_savings,
             self.transaction_id,
+        ))
+    }
+
+    #[inline]
+    fn load_account_mut_optional_with_rebate<'a, 'db, DB: Database>(
+        &'a mut self,
+        db: &'db mut DB,
+        address: Address,
+        skip_cold_load: bool,
+        record_account_rebate: bool,
+    ) -> Result<StateLoad<JournaledAccount<'a, DB, ENTRY>>, JournalLoadError<DB::Error>>
+    where
+        'db: 'a,
+    {
+        let (account, is_cold) = match self.state.entry(address) {
+            Entry::Occupied(entry) => {
+                let account = entry.into_mut();
+
+                let mut is_cold = account.is_cold_transaction_id(self.transaction_id);
+
+                if unlikely(is_cold) {
+                    let tx_access_cold = self.warm_addresses.is_cold(&address);
+                    let persistent_warm = self
+                        .persistent_warm_cache
+                        .as_ref()
+                        .is_some_and(|cache| cache.is_address_warm(&address));
+
+                    if tx_access_cold && persistent_warm && record_account_rebate {
+                        self.tx_warming_savings += 2500;
+                    }
+                    is_cold = self.warm_addresses.check_is_cold(&address, skip_cold_load)?;
+
+                    account.mark_warm_with_transaction_id(self.transaction_id);
+
+                    if account.is_selfdestructed_locally() {
+                        account.selfdestruct();
+                        account.unmark_selfdestructed_locally();
+                    }
+                    *account.original_info = account.info.clone();
+                    account.unmark_created_locally();
+                    self.journal.push(ENTRY::account_warmed(address));
+
+                    if let Some(cache) = &mut self.persistent_warm_cache {
+                        cache.warm_account(address);
+                    }
+                }
+                (account, is_cold)
+            }
+            Entry::Vacant(vac) => {
+                let tx_access_cold = self.warm_addresses.is_cold(&address);
+                let persistent_warm = self
+                    .persistent_warm_cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.is_address_warm(&address));
+                if tx_access_cold && persistent_warm && record_account_rebate {
+                    self.tx_warming_savings += 2500;
+                }
+                let is_cold = self.warm_addresses.check_is_cold(&address, skip_cold_load)?;
+
+                let account = if let Some(account) = db.basic(address)? {
+                    let mut account: Account = account.into();
+                    account.transaction_id = self.transaction_id;
+                    account
+                } else {
+                    Account::new_not_existing(self.transaction_id)
+                };
+
+                if is_cold {
+                    self.journal.push(ENTRY::account_warmed(address));
+                }
+
+                if let Some(cache) = &mut self.persistent_warm_cache {
+                    cache.warm_account(address);
+                }
+
+                (vac.insert(account), is_cold)
+            }
+        };
+
+        Ok(StateLoad::new(
+            JournaledAccount::new(
+                address,
+                account,
+                &mut self.journal,
+                db,
+                self.warm_addresses.access_list(),
+                self.persistent_warm_cache.as_mut(),
+                &mut self.tx_warming_savings,
+                self.transaction_id,
+            ),
+            is_cold,
         ))
     }
 
@@ -731,73 +865,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     where
         'db: 'a,
     {
-        let (account, is_cold) = match self.state.entry(address) {
-            Entry::Occupied(entry) => {
-                let account = entry.into_mut();
-
-                // skip load if account is cold.
-                let mut is_cold = account.is_cold_transaction_id(self.transaction_id);
-
-                if unlikely(is_cold) {
-                    is_cold = self
-                        .warm_addresses
-                        .check_is_cold(&address, skip_cold_load)?;
-
-                    // mark it warm.
-                    account.mark_warm_with_transaction_id(self.transaction_id);
-
-                    // if it is cold loaded and we have selfdestructed locally it means that
-                    // account was selfdestructed in previous transaction and we need to clear its information and storage.
-                    if account.is_selfdestructed_locally() {
-                        account.selfdestruct();
-                        account.unmark_selfdestructed_locally();
-                    }
-                    // set original info to current info.
-                    *account.original_info = account.info.clone();
-
-                    // unmark locally created
-                    account.unmark_created_locally();
-
-                    // journal loading of cold account.
-                    self.journal.push(ENTRY::account_warmed(address));
-                }
-                (account, is_cold)
-            }
-            Entry::Vacant(vac) => {
-                // Precompiles,  among some other account(access list and coinbase included)
-                // are warm loaded so we need to take that into account
-                let is_cold = self
-                    .warm_addresses
-                    .check_is_cold(&address, skip_cold_load)?;
-
-                let account = if let Some(account) = db.basic(address)? {
-                    let mut account: Account = account.into();
-                    account.transaction_id = self.transaction_id;
-                    account
-                } else {
-                    Account::new_not_existing(self.transaction_id)
-                };
-
-                // journal loading of cold account.
-                if is_cold {
-                    self.journal.push(ENTRY::account_warmed(address));
-                }
-
-                (vac.insert(account), is_cold)
-            }
-        };
-
-        Ok(StateLoad::new(
-            JournaledAccount::new(
-                address,
-                account,
-                &mut self.journal,
-                db,
-                self.warm_addresses.access_list(),
-                self.transaction_id,
-            ),
-            is_cold,
-        ))
+        self.load_account_mut_optional_with_rebate(db, address, skip_cold_load, true)
     }
 
     /// Loads storage slot.
@@ -809,7 +877,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         key: StorageKey,
         skip_cold_load: bool,
     ) -> Result<StateLoad<StorageValue>, JournalLoadError<DB::Error>> {
-        self.load_account_mut(db, address)?
+        self.load_account_mut_optional_with_rebate(db, address, false, false)?
             .sload_concrete_error(key, skip_cold_load)
             .map(|s| s.map(|s| s.present_value))
     }
@@ -829,9 +897,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             return Err(JournalLoadError::ColdLoadSkipped);
         };
 
-        account
-            .sload_concrete_error(key, skip_cold_load)
-            .map(|s| s.map(|s| s.present_value))
+        account.sload_concrete_error(key, skip_cold_load).map(|s| s.map(|s| s.present_value))
     }
 
     /// Stores storage slot.
@@ -846,7 +912,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         new: StorageValue,
         skip_cold_load: bool,
     ) -> Result<StateLoad<SStoreResult>, JournalLoadError<DB::Error>> {
-        self.load_account_mut(db, address)?
+        self.load_account_mut_optional_with_rebate(db, address, false, false)?
             .sstore_concrete_error(key, new, skip_cold_load)
     }
 
@@ -876,10 +942,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     /// EIP-1153: Transient storage opcodes
     #[inline]
     pub fn tload(&mut self, address: Address, key: StorageKey) -> StorageValue {
-        self.transient_storage
-            .get(&(address, key))
-            .copied()
-            .unwrap_or_default()
+        self.transient_storage.get(&(address, key)).copied().unwrap_or_default()
     }
 
     /// Store transient storage tied to the account.
@@ -897,10 +960,8 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             self.transient_storage.remove(&(address, key))
         } else {
             // insert values
-            let previous_value = self
-                .transient_storage
-                .insert((address, key), new)
-                .unwrap_or_default();
+            let previous_value =
+                self.transient_storage.insert((address, key), new).unwrap_or_default();
 
             // check if previous value is same
             if previous_value != new {
@@ -913,8 +974,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
 
         if let Some(had_value) = had_value {
             // insert in journal only if value was changed.
-            self.journal
-                .push(ENTRY::transient_storage_changed(address, key, had_value));
+            self.journal.push(ENTRY::transient_storage_changed(address, key, had_value));
         }
     }
 
@@ -930,7 +990,7 @@ mod tests {
     use super::*;
     use context_interface::journaled_state::entry::JournalEntry;
     use database_interface::EmptyDB;
-    use primitives::{address, HashSet, U256};
+    use primitives::{HashSet, U256, address};
     use state::AccountInfo;
 
     #[test]
@@ -947,9 +1007,7 @@ mod tests {
             code: Some(Bytecode::default()),
             account_id: None,
         };
-        journal
-            .state
-            .insert(test_address, Account::from(account_info));
+        journal.state.insert(test_address, Account::from(account_info));
 
         // Add storage slot to access list (make it warm)
         let mut access_list = HashMap::default();
@@ -967,5 +1025,89 @@ mod tests {
         let state_load = result.unwrap();
         assert!(!state_load.is_cold); // Should be warm
         assert_eq!(state_load.data, U256::ZERO); // Empty slot
+    }
+
+    #[test]
+    fn test_block_warm_account_rebate_is_2500() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.enable_persistent_warming();
+        let test_address = address!("2000000000000000000000000000000000000000");
+
+        let account_info = AccountInfo {
+            balance: U256::from(1000),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: Some(Bytecode::default()),
+            account_id: None,
+        };
+        journal.state.insert(test_address, Account::from(account_info));
+
+        let mut db = EmptyDB::new();
+        let first = journal.load_account_mut_optional(&mut db, test_address, false).unwrap();
+        assert!(first.is_cold);
+        drop(first);
+        journal.commit_tx();
+
+        let second = journal.load_account_mut_optional(&mut db, test_address, false).unwrap();
+        assert!(second.is_cold);
+        assert_eq!(journal.tx_warming_savings, 2500);
+    }
+
+    #[test]
+    fn test_block_warm_sload_rebate_is_2000() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.enable_persistent_warming();
+        let test_address = address!("3000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        let account_info = AccountInfo {
+            balance: U256::from(1000),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: Some(Bytecode::default()),
+            account_id: None,
+        };
+        journal.state.insert(test_address, Account::from(account_info));
+
+        let mut db = EmptyDB::new();
+        let first =
+            journal.sload_assume_account_present(&mut db, test_address, test_key, false).unwrap();
+        assert!(first.is_cold);
+        journal.commit_tx();
+
+        let second =
+            journal.sload_assume_account_present(&mut db, test_address, test_key, false).unwrap();
+        assert!(second.is_cold);
+        assert_eq!(journal.tx_warming_savings, 2000);
+    }
+
+    #[test]
+    fn test_block_warm_sstore_rebate_is_2100() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.enable_persistent_warming();
+        let test_address = address!("4000000000000000000000000000000000000000");
+        let test_key = U256::from(1);
+
+        let account_info = AccountInfo {
+            balance: U256::from(1000),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: Some(Bytecode::default()),
+            account_id: None,
+        };
+        journal.state.insert(test_address, Account::from(account_info));
+
+        let mut db = EmptyDB::new();
+        let first = journal
+            .sstore_assume_account_present(&mut db, test_address, test_key, U256::from(1), false)
+            .unwrap();
+        assert!(first.is_cold);
+        journal.commit_tx();
+
+        let second = journal
+            .sstore_assume_account_present(&mut db, test_address, test_key, U256::from(2), false)
+            .unwrap();
+        assert!(second.is_cold);
+        assert_eq!(journal.tx_warming_savings, 2100);
     }
 }
