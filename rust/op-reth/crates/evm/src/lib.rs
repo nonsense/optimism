@@ -20,7 +20,8 @@ use op_alloy_consensus::EIP1559ParamError;
 use op_revm::{OpSpecId, OpTransaction};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
-    ConfigureEvm, EvmEnv, TransactionEnv, eth::NextEvmEnvAttributes, precompiles::PrecompilesMap,
+    ConfigureEvm, EvmEnv, TransactionEnv, eth::NextEvmEnvAttributes,
+    precompiles::PrecompilesMap,
 };
 use reth_optimism_chainspec::OpChainSpec;
 use reth_optimism_forks::OpHardforks;
@@ -58,8 +59,11 @@ pub use build::OpBlockAssembler;
 
 mod error;
 pub use error::{L1BlockInfoError, OpBlockExecutionError};
+mod sdm_ext;
 
 pub use alloy_op_evm::{OpBlockExecutionCtx, OpBlockExecutorFactory, OpEvm, OpEvmFactory};
+pub use alloy_op_evm::sdm;
+pub use sdm_ext::ConfigureSdmEvm;
 
 /// Optimism-related EVM configuration.
 #[derive(Debug)]

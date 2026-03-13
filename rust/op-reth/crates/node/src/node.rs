@@ -11,6 +11,7 @@ use op_alloy_rpc_types_engine::OpExecutionData;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, Hardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_evm::ConfigureEvm;
+use reth_optimism_evm::ConfigureSdmEvm;
 use reth_network::{
     NetworkConfig, NetworkHandle, NetworkManager, NetworkPrimitives, PeersInfo,
     types::BasicNetworkPrimitives,
@@ -505,7 +506,7 @@ where
                 Primitives: OpPayloadPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
-            Evm: ConfigureEvm<
+            Evm: ConfigureSdmEvm<
                 NextBlockEnvCtx: BuildNextEnv<
                     Attrs,
                     HeaderTy<N::Types>,
@@ -634,7 +635,7 @@ where
                 Primitives: OpPayloadPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
-            Evm: ConfigureEvm<
+            Evm: ConfigureSdmEvm<
                 NextBlockEnvCtx: BuildNextEnv<
                     Attrs,
                     HeaderTy<N::Types>,
@@ -1123,7 +1124,7 @@ where
                 >,
             >,
         >,
-    Evm: ConfigureEvm<
+    Evm: ConfigureSdmEvm<
             Primitives = PrimitivesTy<Node::Types>,
             NextBlockEnvCtx: BuildNextEnv<
                 Attrs,
