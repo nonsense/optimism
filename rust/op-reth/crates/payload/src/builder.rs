@@ -5,7 +5,7 @@ use crate::{
 };
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_evm::Evm as AlloyEvm;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_engine::PayloadId;
 use reth_basic_payload_builder::*;
@@ -365,6 +365,27 @@ impl<Txs> OpBuilder<'_, Txs> {
             if !ctx.is_better_payload(info.total_fees) {
                 // can skip building the block
                 return Ok(BuildOutcomeKind::Aborted { fees: info.total_fees });
+            }
+        }
+
+        // 4. SDM Block-Level Warming: build the synthetic SDM transaction from
+        //    accumulated warming entries and execute it through the builder.
+        if reth_optimism_evm::sdm::channel::is_active() {
+            use alloy_consensus::Sealable;
+            let entries = reth_optimism_evm::sdm::channel::take_sdm_entries();
+            let sdm_tx = op_alloy_consensus::sdm::build_sdm_tx(entries);
+            let sdm_sealed = sdm_tx.seal_slow();
+            let sdm_signed: N::SignedTx = sdm_sealed.into();
+            let sdm_recovered =
+                alloy_consensus::transaction::Recovered::new_unchecked(sdm_signed, Address::ZERO);
+
+            match builder.execute_transaction(sdm_recovered) {
+                Ok(_gas_used) => {
+                    debug!(target: "payload_builder", "SDM tx included in block");
+                }
+                Err(err) => {
+                    warn!(target: "payload_builder", %err, "SDM tx execution failed, skipping");
+                }
             }
         }
 

@@ -60,6 +60,7 @@ mod error;
 pub use error::{L1BlockInfoError, OpBlockExecutionError};
 
 pub use alloy_op_evm::{OpBlockExecutionCtx, OpBlockExecutorFactory, OpEvm, OpEvmFactory};
+pub use alloy_op_evm::sdm;
 
 /// Optimism-related EVM configuration.
 #[derive(Debug)]
