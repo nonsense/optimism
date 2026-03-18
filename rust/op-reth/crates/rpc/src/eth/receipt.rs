@@ -373,16 +373,14 @@ impl OpReceiptBuilder {
         let OpTransactionReceiptFields {
             l1_block_info,
             op_gas_refund,
-            deposit_nonce,
-            deposit_receipt_version,
+            deposit_nonce: _,
+            deposit_receipt_version: _,
         } = op_receipt_fields;
 
         OpTransactionReceipt {
             inner,
             l1_block_info,
             op_gas_refund,
-            deposit_nonce,
-            deposit_receipt_version,
         }
     }
 }

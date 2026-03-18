@@ -22,12 +22,6 @@ pub struct OpTransactionReceipt {
     /// Per-transaction gas refund from SDM block-level warming.
     #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
     pub op_gas_refund: Option<u64>,
-    /// Deposit nonce for deposit transactions.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
-    pub deposit_nonce: Option<u64>,
-    /// Deposit receipt version for deposit transactions.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
-    pub deposit_receipt_version: Option<u64>,
 }
 
 impl alloy_network_primitives::ReceiptResponse for OpTransactionReceipt {
