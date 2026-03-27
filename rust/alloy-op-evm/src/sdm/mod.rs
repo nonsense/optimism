@@ -1,23 +1,36 @@
 //! SDM (Sequencer-Defined Metering) execution extensions.
 
+mod inspector;
+
 use alloc::vec::Vec;
-use alloy_evm::Database;
 use op_alloy::consensus::sdm::{SDMGasEntry, SDMPayload};
+
+pub use inspector::{
+    SdmCompositeInspector, SdmExecutedTx, SdmTxContext, SdmTxKind, SdmWarmingInspector,
+    WarmingRefundEvent, WarmingRefundKind,
+};
 
 use crate::{
     OpEvm,
     block::{OpBlockExecutor, receipt_builder::OpReceiptBuilder},
 };
 
-/// Extension trait for EVMs that expose SDM warming savings for the last executed transaction.
+/// Extension trait for EVMs that expose SDM warming results for the last executed transaction.
 pub trait SdmEvmExt {
-    /// Take the warming savings recorded for the most recently executed transaction.
-    fn take_last_tx_warming_savings(&mut self) -> u64;
+    /// Begin SDM tracking for the next transaction.
+    fn begin_sdm_tx(&mut self, ctx: SdmTxContext);
+
+    /// Take the exact warming result for the most recently executed transaction.
+    fn take_last_sdm_tx_result(&mut self) -> SdmExecutedTx;
 }
 
-impl<DB: Database, I, P, Tx> SdmEvmExt for OpEvm<DB, I, P, Tx> {
-    fn take_last_tx_warming_savings(&mut self) -> u64 {
-        Self::take_last_tx_warming_savings(self)
+impl<DB: alloy_evm::Database, I, P, Tx> SdmEvmExt for OpEvm<DB, I, P, Tx> {
+    fn begin_sdm_tx(&mut self, ctx: SdmTxContext) {
+        Self::begin_sdm_tx(self, ctx)
+    }
+
+    fn take_last_sdm_tx_result(&mut self) -> SdmExecutedTx {
+        Self::take_last_sdm_tx_result(self)
     }
 }
 
@@ -28,6 +41,9 @@ pub trait SdmExecutorExt {
 
     /// Take the accumulated SDM entries for the current block.
     fn take_sdm_entries(&mut self) -> Vec<SDMGasEntry>;
+
+    /// Take the exact per-transaction warming refund attribution events aligned with receipts.
+    fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>>;
 }
 
 impl<E, R, Spec> SdmExecutorExt for OpBlockExecutor<E, R, Spec>
@@ -42,5 +58,9 @@ where
 
     fn take_sdm_entries(&mut self) -> Vec<SDMGasEntry> {
         OpBlockExecutor::take_sdm_entries(self)
+    }
+
+    fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
+        OpBlockExecutor::take_warming_events_by_tx(self)
     }
 }

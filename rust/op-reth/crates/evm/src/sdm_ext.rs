@@ -1,7 +1,9 @@
 use alloc::{sync::Arc, vec::Vec};
 use alloy_consensus::Header;
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded, block::BlockExecutorFor};
-use alloy_op_evm::{OpBlockExecutor, block::receipt_builder::OpReceiptBuilder, sdm::SdmExecutorExt};
+use alloy_op_evm::{
+    OpBlockExecutor, block::receipt_builder::OpReceiptBuilder, sdm::SdmExecutorExt,
+};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
     ConfigureEvm, Database,
@@ -77,7 +79,8 @@ where
             self.executor_factory.spec(),
             self.executor_factory.receipt_builder(),
         )
-        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings))
+        .with_sdm_begin(alloy_op_evm::sdm::SdmEvmExt::begin_sdm_tx)
+        .with_sdm_result(alloy_op_evm::sdm::SdmEvmExt::take_last_sdm_tx_result))
     }
 
     fn sdm_builder_for_next_block<'a, DB: Database + 'a>(
@@ -101,7 +104,8 @@ where
             self.executor_factory.spec(),
             self.executor_factory.receipt_builder(),
         )
-        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings);
+        .with_sdm_begin(alloy_op_evm::sdm::SdmEvmExt::begin_sdm_tx)
+        .with_sdm_result(alloy_op_evm::sdm::SdmEvmExt::take_last_sdm_tx_result);
 
         Ok(BasicBlockBuilder::<
             'a,
