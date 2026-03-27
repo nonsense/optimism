@@ -1,11 +1,11 @@
 use crate::{FromRecoveredTx, FromTxWithEncoded};
 
 use alloy_consensus::{
-    Signed, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip7702, TxLegacy,
+    Signed, Transaction, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip7702, TxLegacy,
 };
 use alloy_eips::{eip7594::Encodable7594, Encodable2718, Typed2718};
 use alloy_primitives::{Address, Bytes};
-use op_alloy::consensus::{OpTxEnvelope, TxDeposit};
+use op_alloy::consensus::{OpTxEnvelope, TxDeposit, TxSdm};
 use op_revm::{transaction::deposit::DepositTransactionParts, OpTransaction};
 use revm::context::TxEnv;
 
@@ -16,8 +16,15 @@ impl FromRecoveredTx<OpTxEnvelope> for TxEnv {
             OpTxEnvelope::Eip1559(tx) => Self::from_recovered_tx(tx.tx(), caller),
             OpTxEnvelope::Eip2930(tx) => Self::from_recovered_tx(tx.tx(), caller),
             OpTxEnvelope::Eip7702(tx) => Self::from_recovered_tx(tx.tx(), caller),
+            OpTxEnvelope::Sdm(tx) => Self::from_recovered_tx(tx.inner(), caller),
             OpTxEnvelope::Deposit(tx) => Self::from_recovered_tx(tx.inner(), caller),
         }
+    }
+}
+
+impl FromRecoveredTx<TxSdm> for TxEnv {
+    fn from_recovered_tx(tx: &TxSdm, caller: Address) -> Self {
+        Self { tx_type: tx.ty(), caller, gas_limit: 0, kind: tx.kind(), ..Default::default() }
     }
 }
 
@@ -65,8 +72,16 @@ impl FromTxWithEncoded<OpTxEnvelope> for OpTransaction<TxEnv> {
             OpTxEnvelope::Eip1559(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Eip2930(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Eip7702(tx) => Self::from_encoded_tx(tx, caller, encoded),
+            OpTxEnvelope::Sdm(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
             OpTxEnvelope::Deposit(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
         }
+    }
+}
+
+impl FromTxWithEncoded<TxSdm> for OpTransaction<TxEnv> {
+    fn from_encoded_tx(tx: &TxSdm, caller: Address, encoded: Bytes) -> Self {
+        let base = TxEnv::from_recovered_tx(tx, caller);
+        Self { base, enveloped_tx: Some(encoded), deposit: Default::default() }
     }
 }
 
