@@ -306,6 +306,7 @@ reth-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-cli-commands = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-cli-runner = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
+reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-codecs = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", default-features = false }
 reth-consensus-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.3", default-features = false }
@@ -532,6 +533,7 @@ tempfile = "3.24.0"
 serial_test = "3"
 test-case = "3"
 test-fuzz = "7.2.5"
+visibility = "0.1.1"
 
 # ==================== COMPRESSION ====================
 alloc-no-stdlib = "2.0.4"
@@ -661,3 +663,8 @@ op-alloy-rpc-types = { path = "op-alloy/crates/rpc-types" }
 op-alloy = { path = "op-alloy/crates/op-alloy" }
 # Duplicated by: alloy-evm (crates.io)
 alloy-op-hardforks = { path = "alloy-op-hardforks/" }
+alloy-evm = { path = "vendor/alloy-evm" }
+
+[patch."https://github.com/paradigmxyz/reth"]
+reth-codecs = { path = "vendor/reth-codecs" }
+reth-primitives-traits = { path = "vendor/reth-primitives-traits" }
