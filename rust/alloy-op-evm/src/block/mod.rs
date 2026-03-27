@@ -1,7 +1,7 @@
 //! Block executor for Optimism.
 
 use crate::OpEvmFactory;
-use alloc::{borrow::Cow, boxed::Box, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
 use alloy_eips::{Encodable2718, Typed2718};
 use alloy_evm::{
@@ -17,7 +17,10 @@ use alloy_evm::{
 use alloy_op_hardforks::{OpChainHardforks, OpHardforks};
 use alloy_primitives::{Address, B256, Bytes};
 use canyon::ensure_create2_deployer;
-use op_alloy::consensus::OpDepositReceipt;
+use op_alloy::consensus::{
+    OpDepositReceipt,
+    sdm::{SDMGasEntry, SDMPayload},
+};
 use op_revm::{
     L1BlockInfo, OpTransaction, constants::L1_BLOCK_CONTRACT, estimate_tx_compressed_size,
     transaction::deposit::DEPOSIT_TRANSACTION_TYPE,
@@ -26,9 +29,14 @@ pub use receipt_builder::OpAlloyReceiptBuilder;
 use receipt_builder::OpReceiptBuilder;
 use revm::{
     Database as _, DatabaseCommit, Inspector,
-    context::{Block, result::ResultAndState},
+    context::{
+        Block,
+        result::{ExecutionResult, Output, ResultAndState, SuccessReason},
+    },
     database::{DatabaseCommitExt, State},
 };
+
+use crate::sdm::{SdmExecutedTx, SdmTxContext, SdmTxKind, WarmingRefundEvent};
 
 mod canyon;
 pub mod receipt_builder;
@@ -64,8 +72,14 @@ pub struct OpTxResult<H, T> {
     pub inner: EthTxResult<H, T>,
     /// Whether the transaction is a deposit transaction.
     pub is_deposit: bool,
+    /// Whether the transaction is an SDM transaction.
+    pub is_sdm: bool,
     /// The sender of the transaction.
     pub sender: Address,
+    /// Savings realized from block-level warming for this transaction.
+    pub warming_savings: u64,
+    /// Exact warming refund attribution events for this transaction.
+    pub warming_events: Vec<WarmingRefundEvent>,
 }
 
 impl<H, T> TxResult for OpTxResult<H, T> {
@@ -100,6 +114,18 @@ pub struct OpBlockExecutor<Evm, R: OpReceiptBuilder, Spec> {
     pub is_regolith: bool,
     /// Utility to call system smart contracts.
     pub system_caller: SystemCaller<Spec>,
+
+    // -- SDM Block-Level Warming fields --
+    /// Accumulated per-tx warming refunds for SDM tx assembly (sequencer mode).
+    pub sdm_entries: Vec<SDMGasEntry>,
+    /// SDM payload extracted from an existing SDM tx in the block (verifier mode).
+    pub sdm_payload: Option<SDMPayload>,
+    /// Begin SDM tracking for the next transaction.
+    pub begin_sdm_tx: fn(&mut Evm, SdmTxContext),
+    /// Extractor for the most recent transaction's exact warming result.
+    pub take_last_sdm_tx_result: fn(&mut Evm) -> SdmExecutedTx,
+    /// Per-transaction exact warming refund attribution events aligned with receipts.
+    pub warming_events_by_tx: Vec<Vec<WarmingRefundEvent>>,
 }
 
 impl<E, R, Spec> OpBlockExecutor<E, R, Spec>
@@ -121,7 +147,44 @@ where
             gas_used: 0,
             da_footprint_used: 0,
             ctx,
+            sdm_entries: Vec::new(),
+            sdm_payload: None,
+            begin_sdm_tx: |_, _| {},
+            take_last_sdm_tx_result: |_| SdmExecutedTx::default(),
+            warming_events_by_tx: Vec::new(),
         }
+    }
+
+    /// Configure how the executor should begin inspector-backed SDM tracking.
+    pub fn with_sdm_begin(mut self, begin_sdm_tx: fn(&mut E, SdmTxContext)) -> Self {
+        self.begin_sdm_tx = begin_sdm_tx;
+        self
+    }
+
+    /// Configure how the executor should read the most recent inspector-backed SDM result.
+    pub fn with_sdm_result(mut self, take_last_sdm_tx_result: fn(&mut E) -> SdmExecutedTx) -> Self {
+        self.take_last_sdm_tx_result = take_last_sdm_tx_result;
+        self
+    }
+
+    /// Enable SDM in verifier mode with a pre-extracted payload.
+    ///
+    /// The verifier extracts the SDM payload from the block's SDM deposit tx
+    /// and passes it here so the executor can validate independently-computed
+    /// warming savings against the sequencer's values.
+    pub fn enable_sdm_verifier(&mut self, payload: SDMPayload) {
+        self.sdm_payload = Some(payload);
+    }
+
+    /// Take the accumulated SDM entries (sequencer mode).
+    /// Returns the entries and clears the internal state.
+    pub fn take_sdm_entries(&mut self) -> Vec<SDMGasEntry> {
+        core::mem::take(&mut self.sdm_entries)
+    }
+
+    /// Take the exact per-transaction warming refund attribution events aligned with receipts.
+    pub fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
+        core::mem::take(&mut self.warming_events_by_tx)
     }
 }
 
@@ -227,6 +290,7 @@ where
     ) -> Result<Self::Result, BlockExecutionError> {
         let (tx_env, tx) = tx.into_parts();
         let is_deposit = tx.tx().ty() == DEPOSIT_TRANSACTION_TYPE;
+        let is_sdm = tx.tx().ty() == op_alloy::consensus::SDM_TX_TYPE_ID;
 
         // The sum of the transaction's gas limit, Tg, and the gas utilized in this block prior,
         // must be no greater than the block's gasLimit.
@@ -241,8 +305,8 @@ where
 
         let da_footprint_used = if self
             .spec
-            .is_jovian_active_at_timestamp(self.evm.block().timestamp().saturating_to()) &&
-            !is_deposit
+            .is_jovian_active_at_timestamp(self.evm.block().timestamp().saturating_to())
+            && !is_deposit
         {
             let da_footprint_available = self.evm.block().gas_limit() - self.da_footprint_used;
 
@@ -262,11 +326,46 @@ where
             0
         };
 
+        if is_sdm {
+            return Ok(OpTxResult {
+                inner: EthTxResult {
+                    result: ResultAndState::new(
+                        ExecutionResult::Success {
+                            reason: SuccessReason::Stop,
+                            gas_used: 0,
+                            gas_refunded: 0,
+                            logs: vec![],
+                            output: Output::Call(Bytes::default()),
+                        },
+                        Default::default(),
+                    ),
+                    blob_gas_used: 0,
+                    tx_type: tx.tx().tx_type(),
+                },
+                is_deposit: false,
+                is_sdm: true,
+                sender: *tx.signer(),
+                warming_savings: 0,
+                warming_events: Vec::new(),
+            });
+        }
+
+        let replay_tx_index = self.receipts.len() as u64;
+        (self.begin_sdm_tx)(
+            &mut self.evm,
+            SdmTxContext {
+                tx_index: replay_tx_index,
+                kind: if is_deposit { SdmTxKind::Deposit } else { SdmTxKind::Normal },
+            },
+        );
+
         // Execute transaction and return the result
         let result = self.evm.transact(tx_env).map_err(|err| {
             let hash = tx.tx().trie_hash();
             BlockExecutionError::evm(err, hash)
         })?;
+        let SdmExecutedTx { refund_total: warming_savings, refund_events: warming_events } =
+            (self.take_last_sdm_tx_result)(&mut self.evm);
 
         Ok(OpTxResult {
             inner: EthTxResult {
@@ -275,7 +374,10 @@ where
                 tx_type: tx.tx().tx_type(),
             },
             is_deposit,
+            is_sdm: false,
             sender: *tx.signer(),
+            warming_savings,
+            warming_events,
         })
     }
 
@@ -283,8 +385,18 @@ where
         let OpTxResult {
             inner: EthTxResult { result: ResultAndState { result, state }, blob_gas_used, tx_type },
             is_deposit,
+            is_sdm,
             sender,
+            warming_savings,
+            warming_events,
         } = output;
+
+        if !is_deposit && !is_sdm && warming_savings > 0 {
+            let entry =
+                SDMGasEntry { index: self.receipts.len() as u64, gas_refund: warming_savings };
+            self.sdm_entries.push(entry);
+        }
+        self.warming_events_by_tx.push(warming_events);
 
         // Fetch the depositor account from the database for the deposit nonce.
         // Note that this *only* needs to be done post-regolith hardfork, as deposit nonces
@@ -303,8 +415,9 @@ where
         self.gas_used += gas_used;
 
         // Update DA footprint if Jovian is active
-        if self.spec.is_jovian_active_at_timestamp(self.evm.block().timestamp().saturating_to()) &&
-            !is_deposit
+        if self.spec.is_jovian_active_at_timestamp(self.evm.block().timestamp().saturating_to())
+            && !is_deposit
+            && !is_sdm
         {
             // Add to DA footprint used
             self.da_footprint_used = self.da_footprint_used.saturating_add(blob_gas_used);
@@ -336,8 +449,8 @@ where
                         // when set. The state transition process ensures
                         // this is only set for post-Canyon deposit
                         // transactions.
-                        deposit_receipt_version: (is_deposit &&
-                            self.spec.is_canyon_active_at_timestamp(
+                        deposit_receipt_version: (is_deposit
+                            && self.spec.is_canyon_active_at_timestamp(
                                 self.evm.block().timestamp().saturating_to(),
                             ))
                         .then_some(1),

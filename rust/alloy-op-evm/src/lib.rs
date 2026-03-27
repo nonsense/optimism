@@ -28,19 +28,24 @@ use core::{
 };
 use op_revm::{
     DefaultOp, OpBuilder, OpContext, OpHaltReason, OpSpecId, OpTransaction,
+    constants::{BASE_FEE_RECIPIENT, L1_FEE_RECIPIENT, OPERATOR_FEE_RECIPIENT},
     precompiles::OpPrecompiles,
 };
 use revm::{
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
     context::{BlockEnv, TxEnv},
-    context_interface::result::{EVMError, ResultAndState},
+    context_interface::{Transaction, result::{EVMError, ResultAndState}},
     handler::{PrecompileProvider, instructions::EthInstructions},
     inspector::NoOpInspector,
     interpreter::{InterpreterResult, interpreter::EthInterpreter},
 };
 
+use crate::sdm::{SdmCompositeInspector, SdmExecutedTx, SdmTxContext, WarmingRefundEvent};
+
 pub mod block;
 pub use block::{OpBlockExecutionCtx, OpBlockExecutor, OpBlockExecutorFactory};
+
+pub mod sdm;
 
 /// OP EVM implementation.
 ///
@@ -54,8 +59,15 @@ pub use block::{OpBlockExecutionCtx, OpBlockExecutor, OpBlockExecutorFactory};
 /// `TransactionEnv`).
 #[allow(missing_debug_implementations)] // missing revm::OpContext Debug impl
 pub struct OpEvm<DB: Database, I, P = OpPrecompiles, Tx = OpTransaction<TxEnv>> {
-    inner: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
+    inner: op_revm::OpEvm<
+        OpContext<DB>,
+        SdmCompositeInspector<I>,
+        EthInstructions<EthInterpreter, OpContext<DB>>,
+        P,
+    >,
     inspect: bool,
+    last_tx_warming_savings: u64,
+    last_tx_warming_events: Vec<WarmingRefundEvent>,
     _tx: PhantomData<Tx>,
 }
 
@@ -64,7 +76,21 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
     pub fn into_inner(
         self,
     ) -> op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P> {
-        self.inner
+        let op_revm::OpEvm(revm::context::Evm {
+            ctx,
+            inspector,
+            instruction,
+            precompiles,
+            frame_stack,
+        }) = self.inner;
+
+        op_revm::OpEvm(revm::context::Evm {
+            ctx,
+            inspector: inspector.into_inner(),
+            instruction,
+            precompiles,
+            frame_stack,
+        })
     }
 
     /// Provides a reference to the EVM context.
@@ -83,11 +109,58 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
     ///
     /// The `inspect` argument determines whether the configured [`Inspector`] of the given
     /// [`OpEvm`](op_revm::OpEvm) should be invoked on [`Evm::transact`].
-    pub const fn new(
+    pub fn new(
         evm: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
         inspect: bool,
     ) -> Self {
-        Self { inner: evm, inspect, _tx: PhantomData }
+        let op_revm::OpEvm(revm::context::Evm {
+            ctx,
+            inspector,
+            instruction,
+            precompiles,
+            frame_stack,
+        }) = evm;
+
+        Self {
+            inner: op_revm::OpEvm(revm::context::Evm {
+                ctx,
+                inspector: SdmCompositeInspector::new(inspector),
+                instruction,
+                precompiles,
+                frame_stack,
+            }),
+            inspect,
+            last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
+            _tx: PhantomData,
+        }
+    }
+
+    /// Begin SDM tracking for the next transaction.
+    pub fn begin_sdm_tx(&mut self, ctx: SdmTxContext) {
+        self.inner.0.inspector.begin_sdm_tx(ctx);
+    }
+
+    /// Notes an account touch that happened outside opcode stepping.
+    pub fn note_sdm_account_touch(&mut self, address: Address) {
+        self.inner.0.inspector.note_account_touch(address);
+    }
+
+    /// Take the warming savings recorded for the most recently executed transaction.
+    pub fn take_last_tx_warming_savings(&mut self) -> u64 {
+        core::mem::take(&mut self.last_tx_warming_savings)
+    }
+
+    /// Take the exact warming refund attribution events recorded for the most recently executed transaction.
+    pub fn take_last_tx_warming_events(&mut self) -> Vec<WarmingRefundEvent> {
+        core::mem::take(&mut self.last_tx_warming_events)
+    }
+
+    /// Take the extracted SDM result for the most recently executed transaction.
+    pub fn take_last_sdm_tx_result(&mut self) -> SdmExecutedTx {
+        let refund_total = self.take_last_tx_warming_savings();
+        let refund_events = self.take_last_tx_warming_events();
+        SdmExecutedTx { refund_total, refund_events }
     }
 }
 
@@ -135,13 +208,33 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.last_tx_warming_savings = 0;
+        self.last_tx_warming_events.clear();
+
         let inner_tx: OpTransaction<TxEnv> = tx.into();
         let result = if self.inspect {
-            self.inner.inspect_tx(inner_tx)
+            self.inner.inspect_one_tx(inner_tx)
         } else {
-            self.inner.transact(inner_tx)
+            self.inner.transact_one(inner_tx)
         };
-        result.map_err(map_op_err)
+
+        if self.inner.0.ctx.tx.tx_type() != op_revm::transaction::deposit::DEPOSIT_TRANSACTION_TYPE
+        {
+            self.note_sdm_account_touch(L1_FEE_RECIPIENT);
+            self.note_sdm_account_touch(BASE_FEE_RECIPIENT);
+            if self.inner.0.ctx.cfg.spec.is_enabled_in(OpSpecId::ISTHMUS) {
+                self.note_sdm_account_touch(OPERATOR_FEE_RECIPIENT);
+            }
+        }
+
+        let sdm_result = self.inner.0.inspector.finish_sdm_tx();
+        self.last_tx_warming_savings = sdm_result.refund_total;
+        self.last_tx_warming_events = sdm_result.refund_events;
+
+        let state = self.inner.finalize();
+
+        let result = result.map_err(map_op_err)?;
+        Ok(ResultAndState::new(result, state))
     }
 
     fn transact_system_call(
@@ -166,7 +259,7 @@ where
     fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
         (
             &self.inner.0.ctx.journaled_state.database,
-            &self.inner.0.inspector,
+            self.inner.0.inspector.inner(),
             &self.inner.0.precompiles,
         )
     }
@@ -174,7 +267,7 @@ where
     fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
         (
             &mut self.inner.0.ctx.journaled_state.database,
-            &mut self.inner.0.inspector,
+            self.inner.0.inspector.inner_mut(),
             &mut self.inner.0.precompiles,
         )
     }
@@ -221,18 +314,16 @@ where
         input: EvmEnv<OpSpecId>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(NoOpInspector {})
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: false,
-            _tx: PhantomData,
-        }
+        let inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(NoOpInspector {})
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+
+        OpEvm::new(inner, true)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -242,18 +333,16 @@ where
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(inspector)
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: true,
-            _tx: PhantomData,
-        }
+        let inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(inspector)
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+
+        OpEvm::new(inner, true)
     }
 }
 
