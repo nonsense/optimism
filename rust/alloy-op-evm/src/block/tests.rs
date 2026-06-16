@@ -756,8 +756,7 @@ mod sdm {
         const EVM_GAS_USED: u64 = 50_000;
         const REFUND: u64 = 1_000;
 
-        let mut fixture = SDMExecutorFixture::default();
-        fixture.base_fee = BASE_FEE;
+        let mut fixture = SDMExecutorFixture { base_fee: BASE_FEE, ..Default::default() };
         let mut executor = fixture.executor();
 
         let tx = legacy_tx_with_price(0, Address::from([0x11; 20]), DEFAULT_GAS_LIMIT, GAS_PRICE);
@@ -799,8 +798,7 @@ mod sdm {
     // and zero-refund txs produce no balance deltas, regardless of gas price / basefee.
     #[test]
     fn test_post_exec_settlement_deltas_skip_non_refunding_txs() {
-        let mut fixture = SDMExecutorFixture::default();
-        fixture.base_fee = 7;
+        let mut fixture = SDMExecutorFixture { base_fee: 7, ..Default::default() };
         let mut executor = fixture.executor();
         let tx = legacy_tx_with_price(0, Address::from([0x11; 20]), DEFAULT_GAS_LIMIT, 100);
 
